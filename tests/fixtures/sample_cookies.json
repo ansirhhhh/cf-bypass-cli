@@ -1,0 +1,11 @@
+{
+    "domain": "example.com",
+    "cookies": {
+        "cf_clearance": "test_clearance_token_abc123",
+        "__cf_bm": "test_bm_token_xyz789"
+    },
+    "created_at": "2026-07-14T10:00:00+00:00",
+    "expires_at": "2026-07-15T10:00:00+00:00",
+    "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "last_used": "2026-07-14T10:30:00+00:00"
+}

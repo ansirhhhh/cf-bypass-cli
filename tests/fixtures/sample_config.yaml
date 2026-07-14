@@ -1,0 +1,10 @@
+timeout: 30
+headless: true
+strategies:
+  - cloudscraper
+  - curl_cffi
+proxy:
+  enabled: false
+  url: ""
+storage:
+  path: "/tmp/cf-bypass-test-cookies"
