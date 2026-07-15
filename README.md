@@ -8,9 +8,14 @@ A local command-line tool that uses **progressive fallback strategies** to autom
 
 - **Progressive bypass** — L1 (cloudscraper) → L2 (curl_cffi) → L3 (playwright+stealth) → L4 (nodriver)
 - **Cookie persistence** — Validated cookies are cached per domain for instant reuse
+- **Enhanced stealth** — Differentiated fingerprints across L3/L4 with JS evasion patches
+- **Turnstile solver** — Automatic captcha resolution via capsolver/2captcha API integration
+- **Smart challenge polling** — Exponential backoff polling replaces fixed waits in L4
+- **Proxy health checks** — Pre-flight proxy validation with geo-verification
+- **Manual intervention** — Headed mode auto-pauses for manual challenge completion
 - **HTTP API mode** — Start a local server (`cf-bypass serve`) for programmatic access
 - **Batch processing** — Process URL lists and export results to CSV
-- **Proxy support** — Route requests through HTTP/SOCKS proxies
+- **Proxy support** — Route requests through HTTP/SOCKS proxies with quality grading
 
 ## Installation
 

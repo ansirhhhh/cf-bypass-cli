@@ -352,7 +352,7 @@ class PersistentBrowserSession:
         """
         assert self._context is not None
         page = await self._context.new_page()
-        stealth = Stealth()
-        await stealth.apply_stealth_async(page)
-        logger.debug("New page created with stealth applied")
+        from cf_bypass.strategies.stealth import apply_enhanced_stealth_l3
+        await apply_enhanced_stealth_l3(page)
+        logger.debug("New page created with enhanced stealth applied")
         return page

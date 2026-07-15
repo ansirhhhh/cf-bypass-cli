@@ -28,6 +28,9 @@ strategies:
 proxy:
   enabled: false
   url: ""
+  type: "datacenter"
+  geo_required: ""
+  health_check: false
 
 storage:
   path: "~/.cf-bypass/cookies"
@@ -36,11 +39,21 @@ storage:
 
 
 class ProxyConfig:
-    """Proxy configuration."""
+    """Proxy configuration with quality grading and health checks."""
 
-    def __init__(self, enabled: bool = False, url: str = ""):
+    def __init__(
+        self,
+        enabled: bool = False,
+        url: str = "",
+        proxy_type: str = "datacenter",
+        geo_required: str = "",
+        health_check: bool = False,
+    ):
         self.enabled: bool = enabled
         self.url: str = url
+        self.type: str = proxy_type  # residential | datacenter | mobile
+        self.geo_required: str = geo_required  # ISO country code (AU, US, etc.)
+        self.health_check: bool = health_check  # validate before use
 
     def get_url(self) -> Optional[str]:
         """Return proxy URL if enabled and non-empty, else None."""
@@ -49,7 +62,11 @@ class ProxyConfig:
         return None
 
     def __repr__(self) -> str:
-        return f"ProxyConfig(enabled={self.enabled}, url={self.url!r})"
+        return (
+            f"ProxyConfig(enabled={self.enabled}, url={self.url!r}, "
+            f"type={self.type!r}, geo={self.geo_required!r}, "
+            f"health_check={self.health_check})"
+        )
 
 
 class StorageConfig:
@@ -137,6 +154,9 @@ class Config:
         proxy = ProxyConfig(
             enabled=proxy_data.get("enabled", False),
             url=proxy_data.get("url", ""),
+            proxy_type=proxy_data.get("type", "datacenter"),
+            geo_required=proxy_data.get("geo_required", ""),
+            health_check=proxy_data.get("health_check", False),
         )
 
         storage_data = data.get("storage", {})

@@ -163,6 +163,33 @@ class Orchestrator:
         # Resolve proxy (CLI arg > config proxy)
         effective_proxy = proxy or self.config.proxy.get_url()
 
+        # Run proxy health check if configured
+        if effective_proxy and self.config.proxy.health_check:
+            from cf_bypass.proxy_checker import ProxyChecker
+            health = await ProxyChecker.check_latency(
+                effective_proxy, timeout=10.0
+            )
+            if not health.healthy:
+                logger.warning(
+                    f"Proxy health check failed: {health.error}. "
+                    f"Falling back to direct connection."
+                )
+                effective_proxy = None
+            else:
+                # Verify geo requirement
+                geo = self.config.proxy.geo_required
+                if geo and not health.geo_match(geo):
+                    logger.warning(
+                        f"Proxy geo mismatch: need {geo}, got {health.country}. "
+                        f"Falling back to direct connection."
+                    )
+                    effective_proxy = None
+                else:
+                    logger.info(
+                        f"Proxy OK: {health.ip} ({health.country}), "
+                        f"{health.latency_ms:.0f}ms"
+                    )
+
         logger.info(f"Bypass requested: url={url}, domain={domain}, timeout={timeout}")
 
         # --------------------------------------------------------------

@@ -19,7 +19,9 @@
       "PowerShell(python -c \"from curl_cffi.requests import AsyncSession; help\\(AsyncSession.__init__\\)\" 2>&1 | Select-Object -First 60)",
       "PowerShell(python -c \"from cf_bypass.config import Config; path = Config.init_config\\(\\); print\\(f'Created: {path}'\\)\")",
       "Bash(git add *)",
-      "Bash(git commit *)"
+      "Bash(git commit *)",
+      "Bash(git config *)",
+      "Bash(git push *)"
     ]
   }
 }

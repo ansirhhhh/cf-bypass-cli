@@ -39,6 +39,9 @@ class BypassResponse(BaseModel):
     html: Optional[str] = None
     duration: float = 0.0
     error: Optional[str] = None
+    challenge_detected: bool = False
+    challenge_type: Optional[str] = None
+    challenge_required: bool = False  # True when manual intervention is needed
 
 
 class StatusResponse(BaseModel):

@@ -43,6 +43,34 @@ def _detect_challenge(html: str) -> Optional[str]:
     return None
 
 
+async def _wait_for_challenge_resolution(page, timeout: int = 60) -> bool:
+    """Poll until challenge disappears or timeout expires.
+
+    Uses exponential backoff: starts at 2s, multiplies by 1.5× each
+    iteration, capped at 10s.  Returns ``True`` when no challenge
+    indicators remain in the page HTML, or ``False`` on timeout.
+    """
+    deadline = time.time() + timeout
+    interval = 2.0  # initial polling interval in seconds
+    while time.time() < deadline:
+        try:
+            html = await page.get_content()
+        except Exception:
+            await page.sleep(interval)
+            interval = min(interval * 1.5, 10.0)
+            continue
+        challenge = _detect_challenge(html)
+        if not challenge:
+            return True
+        logger.debug(
+            f"Challenge '{challenge}' still active, "
+            f"waiting {interval:.1f}s..."
+        )
+        await page.sleep(interval)
+        interval = min(interval * 1.5, 10.0)  # exponential backoff, cap 10s
+    return False
+
+
 class Level4Nodriver(BaseStrategy):
     """Level 4: nodriver — pure CDP-based browser automation.
 
@@ -71,10 +99,9 @@ class Level4Nodriver(BaseStrategy):
         browser = None
 
         try:
-            browser_args: list = [
-                "--no-sandbox",
-                "--disable-blink-features=AutomationControlled",
-            ]
+            from cf_bypass.strategies.stealth import get_l4_browser_args, apply_enhanced_stealth_l4
+
+            browser_args: list = get_l4_browser_args()
 
             if proxy:
                 browser_args.append(f"--proxy-server={proxy}")
@@ -85,6 +112,9 @@ class Level4Nodriver(BaseStrategy):
             )
 
             page = await browser.get(url)
+
+            # Apply L4-specific CDP-level stealth patches
+            await apply_enhanced_stealth_l4(page)
 
             # Wait for initial page load + challenge resolution.
             # CF Turnstile / Managed Challenge can take 5-15 seconds.
@@ -97,18 +127,128 @@ class Level4Nodriver(BaseStrategy):
 
             # Detect if we landed on a challenge page
             challenge = _detect_challenge(html)
-            if challenge:
-                logger.info(f"Challenge detected: '{challenge}' — waiting longer...")
-                # Wait additional time for auto-resolution (CF Turnstile
-                # sometimes auto-passes if the fingerprint is clean)
-                await page.sleep(10)
-                html = await page.get_content() or ""
-                challenge = _detect_challenge(html)
-                if challenge:
-                    logger.warning(
-                        f"Challenge still present after extended wait: '{challenge}'. "
-                        f"Manual intervention may be required."
+            retries = 0
+            max_retries = 2
+
+            while challenge and retries <= max_retries:
+                if retries == 0:
+                    logger.info(
+                        f"Challenge detected: '{challenge}' — "
+                        f"polling for resolution..."
                     )
+                else:
+                    logger.info(
+                        f"Challenge still present after retry {retries}: "
+                        f"'{challenge}' — reloading page..."
+                    )
+                    try:
+                        await page.reload()
+                    except Exception:
+                        logger.debug("Page reload failed, continuing with current page")
+                    await page.sleep(3)
+
+                # Poll with exponential backoff until challenge clears or timeout
+                remaining = timeout - int(time.time() - start)
+                if remaining <= 0:
+                    remaining = 30  # floor: give at least 30s for polling
+
+                resolved = await _wait_for_challenge_resolution(
+                    page, timeout=min(remaining, 60)
+                )
+
+                if resolved:
+                    html = await page.get_content() or ""
+                    challenge = _detect_challenge(html)
+                    if not challenge:
+                        logger.info("Challenge resolved automatically")
+                        break
+
+                retries += 1
+
+            # Attempt Turnstile solver when challenge persists after polling
+            if challenge and (
+                "turnstile" in (challenge or "") or
+                "challenge-platform" in (challenge or "")
+            ):
+                from cf_bypass.solvers.turnstile import TurnstileSolver
+
+                sitekey = TurnstileSolver.extract_sitekey(html)
+                if sitekey:
+                    logger.info(
+                        f"Attempting Turnstile solve for "
+                        f"sitekey={sitekey[:20]}..."
+                    )
+                    solver = TurnstileSolver()
+                    solve_result = await solver.solve(
+                        page, sitekey, url,
+                        timeout=min(timeout - int(time.time() - start), 60),
+                    )
+                    if solve_result.success:
+                        logger.info(
+                            f"Turnstile solved in {solve_result.duration:.1f}s"
+                        )
+                        # Wait briefly for page to process the token
+                        await page.sleep(3)
+                        html = await page.get_content() or ""
+                        challenge = _detect_challenge(html)
+                        if not challenge:
+                            logger.info("Challenge cleared after Turnstile solve")
+                    else:
+                        logger.warning(
+                            f"Turnstile solve failed: {solve_result.error}"
+                        )
+                else:
+                    logger.debug(
+                        "Turnstile/challenge-platform detected but no "
+                        "sitekey found in HTML"
+                    )
+
+            # Manual intervention mode — when headed and challenge persists
+            if challenge and not headless:
+                manual_timeout = min(
+                    timeout - int(time.time() - start), 120
+                )
+                logger.info(
+                    f"\n{'=' * 60}\n"
+                    f"  ⚠️  CHALLENGE DETECTED: '{challenge}'\n"
+                    f"  Browser window is OPEN — please complete the\n"
+                    f"  verification manually (click checkbox, solve puzzle, etc.).\n"
+                    f"  Waiting up to {manual_timeout}s for manual resolution...\n"
+                    f"{'=' * 60}"
+                )
+                resolved = await _wait_for_challenge_resolution(
+                    page, timeout=manual_timeout
+                )
+                if resolved:
+                    logger.info("✅ Challenge resolved manually!")
+                    html = await page.get_content() or ""
+                    challenge = None
+                else:
+                    logger.warning(
+                        f"Manual intervention timed out after {manual_timeout}s"
+                    )
+                    return BypassResult(
+                        success=True,
+                        html=html,
+                        cookies=cookies,
+                        strategy_name=self.name,
+                        level=self.level,
+                        duration=time.time() - start,
+                        status_code=200,
+                        challenge_detected=True,
+                        challenge_type=challenge,
+                        manual_intervention_needed=True,
+                        error=(
+                            f"Manual intervention timeout ({manual_timeout}s). "
+                            f"Challenge '{challenge}' still active."
+                        ),
+                    )
+
+            if challenge:
+                logger.warning(
+                    f"Challenge still present after {retries} retry(ies): "
+                    f"'{challenge}'. Manual intervention may be required."
+                )
 
             # Log current URL for debugging (may have been redirected)
             try:

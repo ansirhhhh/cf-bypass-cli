@@ -20,6 +20,9 @@ class BypassResult:
         duration: Wall-clock time spent in seconds.
         error: Error message if success=False.
         status_code: HTTP response status code.
+        challenge_detected: Whether a Cloudflare challenge was detected.
+        challenge_type: Type of challenge detected ("turnstile", etc.).
+        manual_intervention_needed: Whether user needs to manually solve.
     """
 
     success: bool
@@ -30,6 +33,9 @@ class BypassResult:
     duration: float = 0.0
     error: Optional[str] = None
     status_code: Optional[int] = None
+    challenge_detected: bool = False
+    challenge_type: Optional[str] = None
+    manual_intervention_needed: bool = False
 
 
 class BaseStrategy(ABC):

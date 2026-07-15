@@ -66,6 +66,33 @@ class TestConfigFromDict:
         assert cfg.proxy.enabled is True
         assert cfg.proxy.get_url() == "http://proxy:8080"
 
+    def test_proxy_config_new_fields(self):
+        """Verify new proxy fields have correct defaults."""
+        cfg = Config._from_dict({
+            "proxy": {
+                "enabled": True,
+                "url": "http://proxy:8080",
+                "type": "residential",
+                "geo_required": "AU",
+                "health_check": True,
+            }
+        })
+        assert cfg.proxy.type == "residential"
+        assert cfg.proxy.geo_required == "AU"
+        assert cfg.proxy.health_check is True
+
+    def test_proxy_config_defaults_new_fields(self):
+        """Old config without new fields keeps sensible defaults."""
+        cfg = Config._from_dict({
+            "proxy": {
+                "enabled": True,
+                "url": "http://proxy:8080",
+            }
+        })
+        assert cfg.proxy.type == "datacenter"
+        assert cfg.proxy.geo_required == ""
+        assert cfg.proxy.health_check is False
+
 
 class TestConfigLoadFromFile:
     """Loading config from a real YAML file."""

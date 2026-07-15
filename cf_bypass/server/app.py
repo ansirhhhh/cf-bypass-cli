@@ -89,6 +89,9 @@ async def _bypass_endpoint(req: BypassRequest) -> BypassResponse:
             status="error",
             duration=duration,
             error=result.error,
+            challenge_detected=result.challenge_detected,
+            challenge_type=result.challenge_type,
+            challenge_required=result.manual_intervention_needed,
         )
 
     return BypassResponse(
@@ -96,6 +99,9 @@ async def _bypass_endpoint(req: BypassRequest) -> BypassResponse:
         cookies=result.cookies,
         html=result.html if not req.cookie_only else None,
         duration=duration,
+        challenge_detected=result.challenge_detected,
+        challenge_type=result.challenge_type,
+        challenge_required=result.manual_intervention_needed,
     )
 
 

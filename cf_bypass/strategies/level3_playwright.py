@@ -111,9 +111,16 @@ class Level3Playwright(BaseStrategy):
                 context = await browser.new_context(**context_kwargs)
                 page = await context.new_page()
 
-                # Apply playwright-stealth anti-detection patches
-                stealth = Stealth()
-                await stealth.apply_stealth_async(page)
+                # Apply enhanced anti-detection patches (stealth + extra evasion)
+                from cf_bypass.strategies.stealth import apply_enhanced_stealth_l3, apply_headless_evasions_l3
+                await apply_enhanced_stealth_l3(page)
+
+                # Headless-specific CDP evasions (UA cleanup, etc.)
+                if headless:
+                    try:
+                        await apply_headless_evasions_l3(page)
+                    except Exception as exc:
+                        logger.debug(f"Headless CDP evasions skipped: {exc}")
 
                 # Inject pre-existing cookies if available
                 if existing_cookies:
