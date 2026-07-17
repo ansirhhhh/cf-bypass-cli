@@ -116,11 +116,48 @@ class Level4Nodriver(BaseStrategy):
             # Apply L4-specific CDP-level stealth patches
             await apply_enhanced_stealth_l4(page)
 
+            # ---- v2.0: Apply fingerprint layers (L6) ----
+            try:
+                from cf_bypass.fingerprint.canvas import CanvasNoiseInjector
+                from cf_bypass.fingerprint.audio import AudioNoiseInjector
+                from cf_bypass.fingerprint.fonts import FontSpoofer
+                import random as _random
+
+                canvas_seed = _random.randint(0, 65535)
+                audio_seed = _random.randint(0, 65535)
+
+                canvas_injector = CanvasNoiseInjector(seed=canvas_seed, mode="subtle")
+                audio_injector = AudioNoiseInjector(seed=audio_seed)
+                font_spoofer = FontSpoofer()
+
+                await page.evaluate(canvas_injector.get_script())
+                await page.evaluate(audio_injector.get_script())
+                await page.evaluate(font_spoofer.get_script())
+                logger.debug("L6 fingerprint applied (canvas, audio, fonts)")
+            except Exception as exc:
+                logger.debug(f"L6 fingerprint skipped: {exc}")
+
+            # ---- v2.0: Apply humanize behavior (L5) ----
+            try:
+                from cf_bypass.humanize.behavior_synth import BehaviorSynth
+                import random as _random
+                synth = BehaviorSynth(page)
+                await synth.pre_navigate()
+                logger.debug("L5 pre-navigation behavior applied")
+            except Exception as exc:
+                logger.debug(f"L5 behavior skipped: {exc}")
+
             # Wait for initial page load + challenge resolution.
             # CF Turnstile / Managed Challenge can take 5-15 seconds.
             settle_seconds = max(8, min(timeout // 2, 20))
             logger.debug(f"Waiting {settle_seconds}s for challenge resolution...")
             await page.sleep(settle_seconds)
+
+            # ---- v2.0: Post-navigation behavior (L5) ----
+            try:
+                await synth.post_navigate()
+            except Exception:
+                pass
 
             # First content capture — may still be challenge page
             html = await page.get_content() or ""

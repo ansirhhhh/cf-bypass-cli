@@ -14,6 +14,7 @@ Provides seven commands:
 import sys
 import json
 import asyncio
+from pathlib import Path
 from typing import Optional
 
 import click
@@ -760,6 +761,382 @@ def monitor(
             config=ctx.obj["config"],
         )
     )
+
+
+# ======================================================================
+#  captcha — test CAPTCHA solving (v2.0)
+# ======================================================================
+
+
+@cli.group()
+def captcha() -> None:
+    """Test and manage CAPTCHA solving."""
+    pass
+
+
+@captcha.command("solve")
+@click.argument("url")
+@click.option(
+    "--type", "-t",
+    "captcha_type",
+    default="auto",
+    type=click.Choice(["auto", "turnstile", "recaptcha_v2", "recaptcha_v3", "hcaptcha", "image"]),
+    show_default=True,
+    help="CAPTCHA type to solve.",
+)
+@click.option(
+    "--sitekey", "-k",
+    default="",
+    help="CAPTCHA sitekey (auto-extracted if not provided).",
+)
+@click.option(
+    "--timeout", "-T",
+    default=120,
+    type=int,
+    show_default=True,
+    help="Timeout in seconds.",
+)
+@click.pass_context
+def captcha_solve(
+    ctx: click.Context,
+    url: str,
+    captcha_type: str,
+    sitekey: str,
+    timeout: int,
+) -> None:
+    """Solve a CAPTCHA on a given URL.
+
+    \b
+    Examples:
+      cf-bypass captcha solve https://example.com
+      cf-bypass captcha solve --type turnstile https://example.com
+      cf-bypass captcha solve --type recaptcha_v2 -k SITEKEY https://example.com
+    """
+    from cf_bypass.solvers.dispatcher import (
+        CaptchaType,
+        DispatcherConfig,
+        CaptchaDispatcher,
+    )
+    from cf_bypass.config import Config
+
+    async def _solve() -> None:
+        config = ctx.obj["config"]
+        cfg = config.captcha
+
+        # Build dispatcher config
+        from cf_bypass.solvers.dispatcher import ProviderEntry
+        entries_by_type = {}
+        for ct_name in ["turnstile", "recaptcha_v2", "recaptcha_v3", "hcaptcha", "image"]:
+            provider_names = cfg.providers.get(ct_name, [])
+            entries = []
+            for i, name in enumerate(provider_names):
+                entries.append(ProviderEntry(
+                    name=name,
+                    api_key=cfg.api_keys.get(name, ""),
+                    priority=i,
+                ))
+            entries_by_type[ct_name] = entries
+
+        dispatcher_config = DispatcherConfig(
+            turnstile=entries_by_type.get("turnstile", []),
+            recaptcha_v2=entries_by_type.get("recaptcha_v2", []),
+            recaptcha_v3=entries_by_type.get("recaptcha_v3", []),
+            hcaptcha=entries_by_type.get("hcaptcha", []),
+            image=entries_by_type.get("image", []),
+            timeout=timeout,
+            max_retries=cfg.max_retries,
+        )
+        dispatcher = CaptchaDispatcher(dispatcher_config)
+
+        if captcha_type == "auto":
+            result = await dispatcher.detect_and_solve(url, url, timeout=timeout)
+        else:
+            ct = CaptchaType(captcha_type)
+            result = await dispatcher.solve(url, ct, sitekey=sitekey, url=url, timeout=timeout)
+
+        if result.success:
+            click.echo(f"✓ CAPTCHA solved successfully!")
+            click.echo(f"  Token: {result.token[:50]}..." if len(result.token or "") > 50 else f"  Token: {result.token}")
+            click.echo(f"  Duration: {result.duration:.1f}s")
+        else:
+            click.echo(f"✗ CAPTCHA solve failed: {result.error}", err=True)
+            raise SystemExit(1)
+
+    asyncio.run(_solve())
+
+
+# ======================================================================
+#  proxy — manage proxy pool (v2.0)
+# ======================================================================
+
+
+@cli.group()
+def proxy() -> None:
+    """Manage proxy pool."""
+    pass
+
+
+@proxy.command("list")
+@click.pass_context
+def proxy_list(ctx: click.Context) -> None:
+    """List all proxies in the pool."""
+    config = ctx.obj["config"]
+
+    if not config.proxy_pool.enabled or not config.proxy_pool.nodes:
+        # Show single proxy if configured
+        if config.proxy.enabled and config.proxy.url:
+            click.echo("Single proxy (legacy mode):")
+            click.echo(f"  URL: {config.proxy.url}")
+            click.echo(f"  Type: {config.proxy.type}")
+            click.echo(f"  Geo required: {config.proxy.geo_required or 'any'}")
+            click.echo(f"  Health check: {config.proxy.health_check}")
+        else:
+            click.echo("No proxies configured.")
+            click.echo("Add proxies to config.yaml under proxy_pool.nodes or proxy.url")
+        return
+
+    click.echo(f"Proxy pool: {len(config.proxy_pool.nodes)} node(s)")
+    click.echo(f"Strategy: {config.proxy_pool.strategy}")
+    click.echo(f"Cooldown: {config.proxy_pool.cooldown_after_failures} failures → {config.proxy_pool.cooldown_duration}s")
+    click.echo("")
+    click.echo(f"{'URL':<45} {'Provider':<15} {'Geo':<6} {'Type':<15}")
+    click.echo("-" * 81)
+    for node in config.proxy_pool.nodes:
+        url_short = node.get("url", "")[:42] + "..." if len(node.get("url", "")) > 45 else node.get("url", "")
+        click.echo(
+            f"{url_short:<45} "
+            f"{node.get('provider', 'manual'):<15} "
+            f"{node.get('geo', node.get('geo_country', '')):<6} "
+            f"{node.get('type', node.get('proxy_type', 'datacenter')):<15}"
+        )
+
+
+@proxy.command("test")
+@click.option("--url", "-u", default="https://httpbin.org/ip", help="URL to test proxy against.")
+@click.option("--timeout", "-t", default=10, type=int, help="Timeout in seconds.")
+@click.pass_context
+def proxy_test(ctx: click.Context, url: str, timeout: int) -> None:
+    """Test proxy connectivity."""
+    from cf_bypass.proxy_checker import ProxyChecker
+
+    config = ctx.obj["config"]
+
+    async def _test() -> None:
+        proxy_url = config.proxy.get_url()
+        if not proxy_url:
+            click.echo("No proxy configured (set proxy.url or proxy_pool.nodes in config.yaml)", err=True)
+            raise SystemExit(1)
+
+        click.echo(f"Testing proxy: {proxy_url[:60]}...")
+        result = await ProxyChecker.check_latency(proxy_url, timeout=float(timeout))
+
+        if result.healthy:
+            click.echo(f"  ✓ Healthy")
+            click.echo(f"  IP: {result.ip}")
+            click.echo(f"  Country: {result.country} ({result.country_code})")
+            click.echo(f"  Latency: {result.latency_ms:.0f}ms")
+        else:
+            click.echo(f"  ✗ Unhealthy: {result.error}", err=True)
+            raise SystemExit(1)
+
+    asyncio.run(_test())
+
+
+# ======================================================================
+#  stats — show metrics (v2.0)
+# ======================================================================
+
+
+@cli.command()
+@click.option("--days", "-d", default=7, type=int, show_default=True, help="Number of days to analyze.")
+@click.option("--domain", default="", help="Filter by domain.")
+@click.option("--strategy", "-s", default="", help="Filter by strategy name.")
+@click.option("--export", "export_path", default="", help="Export stats as JSON to file.")
+@click.pass_context
+def stats(
+    ctx: click.Context,
+    days: int,
+    domain: str,
+    strategy: str,
+    export_path: str,
+) -> None:
+    """Show bypass statistics and success rates.
+
+    \b
+    Examples:
+      cf-bypass stats
+      cf-bypass stats --days 30
+      cf-bypass stats --domain example.com
+      cf-bypass stats --strategy playwright
+      cf-bypass stats --export stats.json
+    """
+    from cf_bypass.observability.storage import MetricsStorage
+
+    config = ctx.obj["config"]
+    db_path = config.observability.path
+
+    storage = MetricsStorage(db_path)
+
+    if not storage.exists:
+        click.echo("No metrics data found.")
+        click.echo(f"Enable observability in config.yaml to start collecting metrics.")
+        click.echo(f"Expected DB path: {db_path}")
+        return
+
+    # Get summary
+    summary = storage.get_summary(days=days)
+
+    click.echo(f"\n  cf-bypass Statistics (last {days} days)")
+    click.echo(f"  {'─' * 50}")
+    click.echo(f"  Total requests:    {summary['total_requests']}")
+    click.echo(f"  Successful:        {summary['success_count']}")
+    click.echo(f"  Success Rate (MSR): {summary['success_rate']:.1%}")
+    click.echo(f"  Avg Duration:      {summary['avg_duration_ms']:.0f}ms")
+    click.echo(f"  Cache Hit Rate:    {summary['cache_hit_rate']:.1%}")
+    click.echo(f"")
+
+    # Strategy breakdown
+    strategy_stats = storage.get_strategy_stats(days=days)
+    if strategy_stats:
+        click.echo(f"  {'Strategy':<20} {'Level':<7} {'Total':<7} {'Success':<9} {'Rate':<8} {'Avg':<10}")
+        click.echo(f"  {'─' * 60}")
+        for s in strategy_stats:
+            if strategy and s["strategy_used"] != strategy:
+                continue
+            click.echo(
+                f"  {s['strategy_used']:<20} "
+                f"L{s['strategy_level']:<6} "
+                f"{s['total']:<7} "
+                f"{s['success']:<9} "
+                f"{s['success_rate']:.1%}     "
+                f"{s['avg_duration']:.0f}ms"
+            )
+        click.echo(f"")
+
+    # Domain breakdown
+    domain_stats = storage.get_domain_stats(domain=domain, days=days)
+    if domain_stats:
+        click.echo(f"  {'Domain':<35} {'Total':<7} {'Success':<9} {'Rate':<8}")
+        click.echo(f"  {'─' * 60}")
+        for d in domain_stats[:10]:
+            rate = d["success"] / d["total"] if d["total"] > 0 else 0
+            click.echo(
+                f"  {d['domain']:<35} "
+                f"{d['total']:<7} "
+                f"{d['success']:<9} "
+                f"{rate:.1%}"
+            )
+        click.echo(f"")
+
+    # Top errors
+    if summary.get("top_errors"):
+        click.echo(f"  Top errors:")
+        for err in summary["top_errors"]:
+            error_text = (err["error_code"] or "(unknown)")[:60]
+            click.echo(f"    [{err['count']}x] {error_text}")
+
+    # Export
+    if export_path:
+        import json
+        data = {
+            "summary": summary,
+            "strategies": strategy_stats,
+            "domains": domain_stats,
+            "daily": storage.get_daily_stats(days=days),
+        }
+        Path(export_path).write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+        click.echo(f"\n  Exported to {export_path}")
+
+
+# ======================================================================
+#  validate-config — check configuration (v2.0)
+# ======================================================================
+
+
+@cli.command("validate-config")
+@click.option(
+    "--config", "-c",
+    type=click.Path(exists=True, dir_okay=False),
+    help="Path to config YAML file.",
+)
+@click.pass_context
+def validate_config(ctx: click.Context, config: Optional[str]) -> None:
+    """Validate the configuration file.
+
+    Checks for:
+    - Valid YAML syntax
+    - Valid strategy names
+    - Valid proxy URLs
+    - CAPTCHA provider consistency
+    """
+    from cf_bypass.config import Config
+
+    cfg = Config.load(config) if config else ctx.obj["config"]
+
+    errors = []
+    warnings = []
+
+    # Check strategies
+    from cf_bypass.strategies import StrategyRegistry
+    valid_names = {s.name for s in StrategyRegistry.get_all()}
+    for name in cfg.enabled_strategies:
+        if name not in valid_names:
+            errors.append(f"Unknown strategy: '{name}'. Valid: {sorted(valid_names)}")
+
+    # Check proxy
+    if cfg.proxy.enabled:
+        if not cfg.proxy.url:
+            errors.append("proxy.enabled=true but proxy.url is empty")
+        elif not cfg.proxy.url.startswith(("http://", "https://", "socks5://")):
+            warnings.append(f"proxy.url may be invalid: {cfg.proxy.url}")
+
+    # Check proxy pool
+    if cfg.proxy_pool.enabled:
+        if not cfg.proxy_pool.nodes:
+            errors.append("proxy_pool.enabled=true but proxy_pool.nodes is empty")
+        for i, node in enumerate(cfg.proxy_pool.nodes):
+            if not node.get("url"):
+                errors.append(f"proxy_pool.nodes[{i}] missing 'url'")
+
+    # Check captcha
+    if cfg.captcha.providers:
+        for ct, providers in cfg.captcha.providers.items():
+            for p in providers:
+                if p not in ("capsolver", "2captcha", "injection", "llm_vision"):
+                    warnings.append(f"Unknown CAPTCHA provider: '{p}' for {ct}")
+                if p in ("capsolver", "2captcha") and not cfg.captcha.api_keys.get(p):
+                    warnings.append(f"CAPTCHA provider '{p}' configured but no api_keys.{p} set")
+
+    # Check fingerprint
+    if cfg.fingerprint.enabled:
+        if cfg.fingerprint.canvas_noise_mode not in ("subtle", "moderate", "aggressive"):
+            errors.append(f"Invalid canvas_noise_mode: {cfg.fingerprint.canvas_noise_mode}")
+
+    # Check routing
+    if cfg.routing.max_retries < 0 or cfg.routing.max_retries > 10:
+        warnings.append(f"routing.retry_policy.max_retries={cfg.routing.max_retries} is unusual")
+
+    if errors:
+        click.echo(click.style(f"\n  ✗ Configuration has {len(errors)} error(s):", fg="red"))
+        for e in errors:
+            click.echo(click.style(f"    ✗ {e}", fg="red"))
+    if warnings:
+        click.echo(click.style(f"\n  ⚠ {len(warnings)} warning(s):", fg="yellow"))
+        for w in warnings:
+            click.echo(click.style(f"    ⚠ {w}", fg="yellow"))
+
+    if not errors and not warnings:
+        click.echo(click.style(f"\n  ✓ Configuration is valid.", fg="green"))
+        click.echo(f"  Strategies: {cfg.enabled_strategies}")
+        click.echo(f"  Proxy: {'enabled' if cfg.proxy.enabled else 'disabled'}")
+        click.echo(f"  Proxy pool: {'enabled' if cfg.proxy_pool.enabled else 'disabled'}")
+        click.echo(f"  Humanize: {'enabled' if cfg.humanize.enabled else 'disabled'}")
+        click.echo(f"  Fingerprint: {'enabled' if cfg.fingerprint.enabled else 'disabled'}")
+        click.echo(f"  Smart routing: {'enabled' if cfg.routing.smart else 'disabled'}")
+        click.echo(f"  Observability: {'enabled' if cfg.observability.enabled else 'disabled'}")
+    else:
+        if errors:
+            raise SystemExit(1)
 
 
 # ======================================================================

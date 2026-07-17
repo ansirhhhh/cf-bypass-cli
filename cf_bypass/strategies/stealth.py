@@ -127,6 +127,187 @@ NAVIGATOR_PROXY_SCRIPT = """
 """
 
 # ======================================================================
+# Real PluginArray + MimeTypeArray emulation
+# ----------------------------------------------------------------------
+# DataDome / Cloudflare / FingerprintJS check 4 things about plugins:
+#   1. `navigator.plugins`            — must be a PluginArray (instanceof + toStringTag)
+#   2. `navigator.mimeTypes`          — must be a MimeTypeArray
+#   3. `Object.prototype.toString.call(navigator.plugins) === '[object PluginArray]'`
+#   4. Real Chrome has 5 default plugins (PDF, Native Client, etc.)
+#
+# The previous version failed these checks because it just set a plain
+# array as plugins, with no toStringTag, no real Plugin prototype, no
+# mimeTypes.  This new script:
+#   - Defines a proper PluginArray / MimeTypeArray class with toStringTag
+#   - Emulates Chrome 120's 5 default plugins (PDF, PDF Viewer, Native Client)
+#   - Each plugin item has Plugin prototype with toStringTag='Plugin'
+#   - mimeTypes mirrors the plugins (3 entries)
+#   - All getters are defined on window.navigator (NOT assignable after)
+# ======================================================================
+
+PLUGIN_ARRAY_SCRIPT = r"""
+(function() {
+    'use strict';
+
+    // ----- helpers -----
+    const defineFrozen = (obj, prop, val) => {
+        try {
+            Object.defineProperty(obj, prop, {
+                value: val,
+                writable: false,
+                enumerable: true,
+                configurable: false,
+            });
+        } catch (e) { /* ignore */ }
+    };
+
+    // ----- Plugin class -----
+    class FakeMimeType {
+        constructor(type, suffixes, description) {
+            this.type = type;
+            this.suffixes = suffixes;
+            this.description = description;
+            this.__proto__ = MimeType.prototype;
+        }
+        [Symbol.toStringTag] = 'MimeType';
+    }
+    class MimeType {
+        [Symbol.toStringTag] = 'MimeType';
+    }
+    class MimeTypeArray {
+        constructor(items) {
+            this._items = items || [];
+            this.length = this._items.length;
+            this.__proto__ = MimeTypeArray.prototype;
+        }
+        item(index) { return this._items[index] || null; }
+        namedItem(name) {
+            return this._items.find(m => m.type === name) || null;
+        }
+        [Symbol.toStringTag] = 'MimeTypeArray';
+    }
+    // Make namedItem / item appear as native code in toString
+    MimeTypeArray.prototype.item = MimeTypeArray.prototype.item;
+    MimeTypeArray.prototype.namedItem = MimeTypeArray.prototype.namedItem;
+
+    class FakePlugin {
+        constructor(name, filename, description, mimeTypes) {
+            this.name = name;
+            this.filename = filename;
+            this.description = description;
+            this.length = mimeTypes.length;
+            this.__proto__ = Plugin.prototype;
+            mimeTypes.forEach((mt, i) => {
+                defineFrozen(this, i, mt);
+            });
+        }
+        item(index) { return this[index] || null; }
+        namedItem(name) { return this._items_by_name && this._items_by_name[name] || null; }
+        [Symbol.toStringTag] = 'Plugin';
+    }
+    class Plugin {
+        [Symbol.toStringTag] = 'Plugin';
+    }
+    class PluginArray {
+        constructor(plugins) {
+            this._plugins = plugins || [];
+            this.length = this._plugins.length;
+            this.__proto__ = PluginArray.prototype;
+        }
+        item(index) { return this._plugins[index] || null; }
+        namedItem(name) { return this._plugins.find(p => p.name === name) || null; }
+        refresh() { /* no-op for stealth */ }
+        [Symbol.toStringTag] = 'PluginArray';
+    }
+
+    // Build Chrome 120 default plugins (5 entries, matching real Chrome)
+    const mtPdf       = new FakeMimeType('application/pdf', 'pdf', 'Portable Document Format');
+    const mtPdfFx     = new FakeMimeType(
+        'application/x-google-chrome-pdf',
+        'pdf',
+        'Portable Document Format'
+    );
+    const mtNaCl      = new FakeMimeType(
+        'application/x-nacl',
+        '',
+        'Native Client Executable'
+    );
+    const mtPnacl     = new FakeMimeType(
+        'application/x-pnacl',
+        '',
+        'Portable Native Client Executable'
+    );
+
+    const pdfPlugin = new FakePlugin(
+        'PDF Viewer',
+        'internal-pdf-viewer',
+        'Portable Document Format',
+        [mtPdf, mtPdfFx]
+    );
+    const chromePdfPlugin = new FakePlugin(
+        'Chrome PDF Viewer',
+        'mhjfbmdgcfjbbpaeojofohoefgiehjai',
+        'Portable Document Format',
+        [mtPdf, mtPdfFx]
+    );
+    const naclPlugin = new FakePlugin(
+        'Native Client',
+        'internal-nacl-plugin',
+        '',
+        [mtNaCl, mtPnacl]
+    );
+    // Chrome typically also lists these (some are partial / disabled)
+    const chromiumPdf = new FakePlugin(
+        'Chromium PDF Viewer',
+        'internal-pdf-viewer',
+        'Portable Document Format',
+        [mtPdf]
+    );
+    const microsoftPdf = new FakePlugin(
+        'Microsoft Edge PDF Viewer',
+        'internal-pdf-viewer',
+        'Portable Document Format',
+        [mtPdf]
+    );
+
+    const pluginsArr = new PluginArray([
+        pdfPlugin,
+        chromePdfPlugin,
+        chromiumPdf,
+        microsoftPdf,
+        naclPlugin,
+    ]);
+
+    const mimesArr = new MimeTypeArray([
+        mtPdf, mtPdfFx, mtNaCl, mtPnacl,
+    ]);
+
+    // ----- install onto navigator -----
+    // First, make sure PluginArray etc. are visible at window scope
+    window.PluginArray = PluginArray;
+    window.Plugin = Plugin;
+    window.MimeType = MimeType;
+    window.MimeTypeArray = MimeTypeArray;
+
+    // Override the getter that the browser uses internally
+    try {
+        Object.defineProperty(navigator, 'plugins', {
+            get: () => pluginsArr,
+            enumerable: true,
+            configurable: true,
+        });
+    } catch (e) { /* ignore */ }
+    try {
+        Object.defineProperty(navigator, 'mimeTypes', {
+            get: () => mimesArr,
+            enumerable: true,
+            configurable: true,
+        });
+    } catch (e) { /* ignore */ }
+})();
+"""
+
+# ======================================================================
 # Function.prototype.toString hiding — makes patched functions appear
 # to be native code.  This is critical: many CF probes check whether
 # navigator.permissions.query.toString() returns "[native code]".
@@ -155,6 +336,9 @@ TOSTRING_HIDING_SCRIPT = """
 })();
 """
 
+# Backwards-compat alias
+TOSTRING_SCRIPT = TOSTRING_HIDING_SCRIPT
+
 # ======================================================================
 # Headless-specific evasions — headless Chrome has unique fingerprints
 # (UA contains "Headless", maxTouchPoints=0, connection.rtt absent).
@@ -182,6 +366,103 @@ HEADLESS_EVASION_SCRIPT = """
 
 
 # ======================================================================
+# WebGL vendor/renderer — real Intel/AMD GPU strings; headless Chrome
+# otherwise returns "Google Inc." (SwiftShader) which is a dead giveaway.
+# ======================================================================
+
+WEBGL_SPOOF_SCRIPT = r"""
+(function() {
+    try {
+        const getParam = WebGLRenderingContext.prototype.getParameter;
+        WebGLRenderingContext.prototype.getParameter = function(param) {
+            // UNMASKED_VENDOR_WEBGL
+            if (param === 37445) return 'Intel Inc.';
+            // UNMASKED_RENDERER_WEBGL
+            if (param === 37446) return 'Intel Iris OpenGL Engine';
+            return getParam.call(this, param);
+        };
+        const getParam2 = WebGL2RenderingContext.prototype.getParameter;
+        WebGL2RenderingContext.prototype.getParameter = function(param) {
+            if (param === 37445) return 'Intel Inc.';
+            if (param === 37446) return 'Intel Iris OpenGL Engine';
+            return getParam2.call(this, param);
+        };
+    } catch (e) { /* ignore */ }
+})();
+"""
+
+# ======================================================================
+# navigator.userAgentData (User-Agent Client Hints)
+# Real Chrome 120 returns brands like "Not_A Brand";v="8", "Chromium";v="120",
+# "Google Chrome";v="120".  Headless and Playwright expose empty or
+# wrong brands, which is a key DataDome signal.
+# ======================================================================
+
+USER_AGENT_DATA_SCRIPT = r"""
+(function() {
+    if (!navigator.userAgentData) {
+        // Polyfill it (so the property exists and behaves like real Chrome)
+        const brands = [
+            { brand: 'Not_A Brand', version: '8' },
+            { brand: 'Chromium',    version: '120' },
+            { brand: 'Google Chrome', version: '120' },
+        ];
+        const uaData = {
+            brands: brands,
+            mobile: false,
+            platform: 'Windows',
+            getHighEntropyValues: function(hints) {
+                return Promise.resolve({
+                    architecture: 'x86',
+                    bitness: '64',
+                    brands: brands,
+                    fullVersionList: brands,
+                    mobile: false,
+                    model: '',
+                    platform: 'Windows',
+                    platformVersion: '15.0.0',
+                    uaFullVersion: '120.0.6099.130',
+                    wow64: false,
+                });
+            },
+            toJSON: function() { return { brands: brands, mobile: false, platform: 'Windows' }; },
+        };
+        try {
+            Object.defineProperty(Navigator.prototype, 'userAgentData', {
+                get: () => uaData,
+                configurable: true,
+            });
+        } catch (e) { /* ignore */ }
+    }
+})();
+"""
+
+# ======================================================================
+# navigator.connection — real Chrome exposes rtt/downlink/effectiveType;
+# headless sometimes leaves it undefined.  Spoof consistent values.
+# ======================================================================
+
+CONNECTION_SPOOF_SCRIPT = r"""
+(function() {
+    if (!navigator.connection) {
+        try {
+            Object.defineProperty(Navigator.prototype, 'connection', {
+                get: () => ({
+                    effectiveType: '4g',
+                    downlink: 10,
+                    rtt: 100,
+                    saveData: false,
+                    addEventListener: function() {},
+                    removeEventListener: function() {},
+                }),
+                configurable: true,
+            });
+        } catch (e) { /* ignore */ }
+    }
+})();
+"""
+
+# ======================================================================
 # L3 (Playwright) Scripts — layered on top of playwright-stealth
 # ======================================================================
 
@@ -195,34 +476,26 @@ L3_ENHANCED_SCRIPTS = [
     # 3. Full chrome runtime (ucd-style complete enums)
     ("chrome_runtime", CHROME_RUNTIME_FULL),
 
-    # 4. Plugins array
-    ("plugins", """
-        Object.defineProperty(navigator, 'plugins', {
-            get: () => {
-                const len = 5;
-                const arr = Array.from({length: len}, (_, i) => ({
-                    name: `Plugin ${i}`,
-                    description: `Plugin ${i} description`,
-                    filename: `plugin${i}.dll`,
-                    length: 1,
-                }));
-                arr.item = (i) => arr[i] || null;
-                arr.namedItem = (name) => arr.find(p => p.name === name) || null;
-                arr.refresh = () => {};
-                Object.setPrototypeOf(arr, PluginArray.prototype);
-                return arr;
-            },
-        });
-    """),
+    # 4. PluginArray + MimeTypeArray — must run before toString hiding
+    ("plugin_array", PLUGIN_ARRAY_SCRIPT),
 
-    # 5. Languages
+    # 5. WebGL vendor/renderer
+    ("webgl_spoof", WEBGL_SPOOF_SCRIPT),
+
+    # 6. userAgentData (Client Hints)
+    ("user_agent_data", USER_AGENT_DATA_SCRIPT),
+
+    # 7. Connection API
+    ("connection_spoof", CONNECTION_SPOOF_SCRIPT),
+
+    # 8. Languages
     ("languages", """
         Object.defineProperty(navigator, 'languages', {
             get: () => ['en-US', 'en'],
         });
     """),
 
-    # 6. Permissions query (with Notification handling)
+    # 9. Permissions query (with Notification handling)
     ("permissions", """
         const _origQ = navigator.permissions.query.bind(navigator.permissions);
         navigator.permissions.query = (params) => {
@@ -233,25 +506,143 @@ L3_ENHANCED_SCRIPTS = [
         };
     """),
 
-    # 7. Hardware specs
+    # 10. Hardware specs
     ("hardware", """
         Object.defineProperty(navigator, 'hardwareConcurrency', { get: () => 8 });
         Object.defineProperty(navigator, 'deviceMemory', { get: () => 8 });
     """),
 
-    # 8. Headless evasions (harmless in headed mode, critical in headless)
+    # 11. Headless evasions (harmless in headed mode, critical in headless)
     ("headless_evasion", HEADLESS_EVASION_SCRIPT),
 
-    # 9. toString hiding — MUST run last, wraps everything above
-    ("tostring_hiding", TOSTRING_HIDING_SCRIPT),
+    # 12. toString hiding — MUST run last, wraps everything above
+    ("tostring_hiding", TOSTRING_SCRIPT),
 ]
 
 
-async def apply_enhanced_stealth_l3(page) -> None:
+# Self-test that runs after the patches — logs which checks pass/fail
+STEALTH_SELF_TEST_SCRIPT = r"""
+(function() {
+    const results = [];
+    function check(name, ok, detail) {
+        results.push({ name: name, ok: ok, detail: detail || '' });
+    }
+
+    // 1. PluginArray toStringTag
+    try {
+        const t = Object.prototype.toString.call(navigator.plugins);
+        check('plugins_toStringTag', t === '[object PluginArray]', 'got: ' + t);
+    } catch (e) { check('plugins_toStringTag', false, e.message); }
+
+    // 2. MimeTypeArray toStringTag
+    try {
+        const t = Object.prototype.toString.call(navigator.mimeTypes);
+        check('mimeTypes_toStringTag', t === '[object MimeTypeArray]', 'got: ' + t);
+    } catch (e) { check('mimeTypes_toStringTag', false, e.message); }
+
+    // 3. plugins instanceof PluginArray
+    try {
+        check('plugins_instanceof', navigator.plugins instanceof PluginArray,
+              'proto=' + Object.getPrototypeOf(navigator.plugins).constructor.name);
+    } catch (e) { check('plugins_instanceof', false, e.message); }
+
+    // 4. plugins has at least 3 entries
+    try {
+        check('plugins_count', navigator.plugins.length >= 3,
+              'length=' + navigator.plugins.length);
+    } catch (e) { check('plugins_count', false, e.message); }
+
+    // 5. PDF plugin exists
+    try {
+        const pdf = navigator.plugins.namedItem('PDF Viewer')
+                 || navigator.plugins.namedItem('Chrome PDF Viewer');
+        check('pdf_plugin_present', pdf !== null, pdf ? pdf.name : 'none');
+    } catch (e) { check('pdf_plugin_present', false, e.message); }
+
+    // 6. navigator.webdriver hidden
+    check('webdriver_hidden', !navigator.webdriver,
+          'value=' + JSON.stringify(navigator.webdriver));
+
+    // 7. languages
+    try {
+        check('languages_set',
+              Array.isArray(navigator.languages) && navigator.languages.length > 0,
+              JSON.stringify(navigator.languages));
+    } catch (e) { check('languages_set', false, e.message); }
+
+    // 8. userAgentData brands
+    try {
+        const brands = (navigator.userAgentData && navigator.userAgentData.brands) || [];
+        check('uaData_brands', brands.length >= 2,
+              JSON.stringify(brands.map(b => b.brand + ':' + b.version)));
+    } catch (e) { check('uaData_brands', false, e.message); }
+
+    // 9. WebGL renderer
+    try {
+        const canvas = document.createElement('canvas');
+        const gl = canvas.getContext('webgl');
+        if (gl) {
+            const ext = gl.getExtension('WEBGL_debug_renderer_info');
+            if (ext) {
+                const r = gl.getParameter(ext.UNMASKED_RENDERER_WEBGL);
+                check('webgl_renderer', r && !/SwiftShader|swiftshader/i.test(r),
+                      'renderer=' + r);
+            } else {
+                check('webgl_renderer', true, 'extension not exposed (ok)');
+            }
+        } else {
+            check('webgl_renderer', true, 'webgl unavailable (ok)');
+        }
+    } catch (e) { check('webgl_renderer', false, e.message); }
+
+    // Print to console so we can grep
+    console.log('[STEALTH-SELFTEST] ' + JSON.stringify(results));
+    window.__stealthSelfTest = results;
+})();
+"""
+
+
+async def run_stealth_self_test(page) -> dict:
+    """Run the self-test and return the result dict.
+
+    Returns a dict of {check_name: {"ok": bool, "detail": str}}.
+    Useful for the orchestrator to log stealth quality.
+    """
+    try:
+        await page.evaluate(STEALTH_SELF_TEST_SCRIPT)
+        # Wait a tick for console to flush
+        await page.wait_for_timeout(500)
+        result = await page.evaluate("() => window.__stealthSelfTest || []")
+        if not isinstance(result, list):
+            return {}
+        return {
+            r.get("name", "?"): {
+                "ok": bool(r.get("ok")),
+                "detail": r.get("detail", ""),
+            }
+            for r in result
+        }
+    except Exception as exc:
+        logger.debug(f"stealth self-test failed: {exc}")
+        return {}
+
+
+async def apply_enhanced_stealth_l3(page, *, run_self_test: bool = False) -> dict:
     """Apply playwright-stealth + undetected-chromedriver-style JS evasions.
 
-    Injects 10 init scripts that run on every new document load.  The
+    Injects 12 init scripts that run on every new document load.  The
     ordering matters: CDC cleanup first, toString hiding last.
+
+    Parameters
+    ----------
+    run_self_test : bool
+        If True, runs STEALTH_SELF_TEST_SCRIPT after navigation and returns
+        the result dict.  Default False (zero overhead during normal use).
+
+    Returns
+    -------
+    dict
+        Self-test result if `run_self_test=True`, else {}.
     """
     # Core playwright-stealth patches
     try:
@@ -273,6 +664,10 @@ async def apply_enhanced_stealth_l3(page) -> None:
     logger.debug(
         f"Enhanced L3 stealth applied ({len(L3_ENHANCED_SCRIPTS)} extra patches)"
     )
+
+    if run_self_test:
+        return await run_stealth_self_test(page)
+    return {}
 
 
 async def apply_headless_evasions_l3(page) -> None:
@@ -315,11 +710,16 @@ L4_CDP_FLAGS = [
 ]
 
 L4_ENHANCED_SCRIPTS = [
-    # Lighter than L3 for fingerprint diversity
+    # Same core evasions as L3 (but evaluated live, not via init script)
     ("cdc_cleanup", CDC_CLEANUP_SCRIPT),
     ("navigator_proxy", NAVIGATOR_PROXY_SCRIPT),
     ("chrome_runtime", CHROME_RUNTIME_FULL),
+    ("plugin_array", PLUGIN_ARRAY_SCRIPT),
+    ("webgl_spoof", WEBGL_SPOOF_SCRIPT),
+    ("user_agent_data", USER_AGENT_DATA_SCRIPT),
+    ("connection_spoof", CONNECTION_SPOOF_SCRIPT),
     ("headless_evasion", HEADLESS_EVASION_SCRIPT),
+    ("tostring_hiding", TOSTRING_HIDING_SCRIPT),
 ]
 
 

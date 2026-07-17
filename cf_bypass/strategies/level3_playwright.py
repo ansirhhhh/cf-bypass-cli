@@ -5,10 +5,13 @@ automation signatures (navigator.webdriver, CDP Runtime.events, etc.),
 navigates to the target page, waits for challenges to resolve, and
 extracts the resulting cookies.
 
+v2.0: Integrates L5 humanize behavior and L6 fingerprint layers.
+
 This is the primary strategy for Cloudflare Managed Challenge.
 """
 
 import time
+import random
 from typing import Optional, Dict
 from urllib.parse import urlparse
 
@@ -122,6 +125,27 @@ class Level3Playwright(BaseStrategy):
                     except Exception as exc:
                         logger.debug(f"Headless CDP evasions skipped: {exc}")
 
+                # ---- v2.0: Apply fingerprint layer (L6) ----
+                try:
+                    from cf_bypass.fingerprint.canvas import CanvasNoiseInjector
+                    from cf_bypass.fingerprint.audio import AudioNoiseInjector
+                    from cf_bypass.fingerprint.fonts import FontSpoofer
+
+                    import random as _random
+                    canvas_seed = _random.randint(0, 65535)
+                    audio_seed = _random.randint(0, 65535)
+
+                    canvas_injector = CanvasNoiseInjector(seed=canvas_seed, mode="subtle")
+                    audio_injector = AudioNoiseInjector(seed=audio_seed)
+                    font_spoofer = FontSpoofer()
+
+                    await page.add_init_script(canvas_injector.get_script())
+                    await page.add_init_script(audio_injector.get_script())
+                    await page.add_init_script(font_spoofer.get_script())
+                    logger.debug("L6 fingerprint layer applied (canvas, audio, fonts)")
+                except Exception as exc:
+                    logger.debug(f"L6 fingerprint layer skipped: {exc}")
+
                 # Inject pre-existing cookies if available
                 if existing_cookies:
                     domain = urlparse(url).netloc
@@ -136,6 +160,17 @@ class Level3Playwright(BaseStrategy):
                     ]
                     await context.add_cookies(cookie_objs)
 
+                # ---- v2.0: Apply humanize warm-up (L5) ----
+                try:
+                    from cf_bypass.humanize.behavior_synth import BehaviorSynth
+                    synth = BehaviorSynth(page)
+                    domain = urlparse(url).netloc
+                    # Light pre-navigation behavior
+                    await synth.pre_navigate()
+                    logger.debug("L5 pre-navigation behavior applied")
+                except Exception as exc:
+                    logger.debug(f"L5 behavior skipped: {exc}")
+
                 # Navigate to target
                 logger.debug(f"Navigating to {url}")
                 response = await page.goto(
@@ -144,23 +179,26 @@ class Level3Playwright(BaseStrategy):
                     timeout=timeout * 1000,
                 )
 
+                # ---- v2.0: Post-navigation behavior (L5) ----
+                try:
+                    await synth.post_navigate()
+                    # Light page interaction to appear human
+                    await synth.scroll.scroll_down(random.uniform(0, 300))
+                except Exception:
+                    pass
+
                 # Wait for post-load challenge resolution.
-                # Cloudflare often triggers redirects / JS execution after
-                # initial DOM load, so we wait for network idle with timeout.
                 try:
                     await page.wait_for_load_state("networkidle", timeout=15_000)
                 except Exception:
-                    pass  # timeout is acceptable; page may still be settling
+                    pass
 
                 # Extra settle time for any async challenge JS
                 await page.wait_for_timeout(3000)
 
                 # Retry-safe content extraction.
-                # If the page is still navigating (e.g. a late redirect from
-                # a challenge), wait and retry up to 3 times.
                 html = await _safe_content(page, retries=3, wait_ms=2000)
                 if html is None:
-                    # Fallback: try once more after a longer settle
                     await page.wait_for_timeout(5000)
                     html = await _safe_content(page, retries=0, wait_ms=0)
                     if html is None:
@@ -176,6 +214,18 @@ class Level3Playwright(BaseStrategy):
                     f"cookies={list(cookies.keys())}, duration={duration:.1f}s"
                 )
 
+                # v2.0: Detect challenge status
+                challenge_detected = False
+                challenge_type = None
+                if html:
+                    html_lower = html.lower()
+                    if "turnstile" in html_lower:
+                        challenge_detected = True
+                        challenge_type = "turnstile"
+                    elif any(kw in html_lower for kw in ["just a moment", "checking your browser"]):
+                        challenge_detected = True
+                        challenge_type = "managed_challenge"
+
                 return BypassResult(
                     success=True,
                     html=html,
@@ -184,6 +234,8 @@ class Level3Playwright(BaseStrategy):
                     level=self.level,
                     duration=duration,
                     status_code=response_status,
+                    challenge_detected=challenge_detected,
+                    challenge_type=challenge_type,
                 )
 
         except Exception as e:
